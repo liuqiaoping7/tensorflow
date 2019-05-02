@@ -23,8 +23,10 @@ import threading
 import numpy as np
 
 from tensorflow.python import keras
+from tensorflow.python import tf2
 from tensorflow.python.eager import context
 from tensorflow.python.framework import tensor_shape
+from tensorflow.python.framework import test_util
 from tensorflow.python.keras.optimizer_v2 import adadelta as adadelta_v2
 from tensorflow.python.keras.optimizer_v2 import adagrad as adagrad_v2
 from tensorflow.python.keras.optimizer_v2 import adam as adam_v2
@@ -65,6 +67,7 @@ def get_test_data(train_samples,
           (x[train_samples:], y[train_samples:]))
 
 
+@test_util.use_deterministic_cudnn
 def layer_test(layer_cls, kwargs=None, input_shape=None, input_dtype=None,
                input_data=None, expected_output=None,
                expected_output_dtype=None):
@@ -680,3 +683,12 @@ def get_v2_optimizer(name, **kwargs):
     raise ValueError(
         'Could not find requested v2 optimizer: {}\nValid choices: {}'.format(
             name, list(_V2_OPTIMIZER_MAP.keys())))
+
+
+def get_expected_metric_variable_names(var_names, name_suffix=''):
+  """Returns expected metric variable names given names and prefix/suffix."""
+  if tf2.enabled() or context.executing_eagerly():
+    # In V1 eager mode and V2 variable names are not made unique.
+    return [n + ':0' for n in var_names]
+  # In V1 graph mode variable names are made unique using a suffix.
+  return [n + name_suffix + ':0' for n in var_names]

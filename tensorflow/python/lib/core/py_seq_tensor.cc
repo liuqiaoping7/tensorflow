@@ -319,12 +319,12 @@ DEFINE_HELPER(ConvertInt64, int64, DT_INT64, ConvertOneInt64);
 const char* ConvertOneUint64(PyObject* v, uint64* out) {
 #if PY_MAJOR_VERSION < 3
   if (TF_PREDICT_TRUE(PyInt_Check(v))) {
-    *out = PyInt_AsUnsignedLongMask(v);
+    *out = PyInt_AsUnsignedLongLongMask(v);
     return nullptr;
   }
 #endif
   if (TF_PREDICT_TRUE(PyLong_Check(v) || IsPyDimension(v))) {
-    *out = PyLong_AsUnsignedLong(v);
+    *out = PyLong_AsUnsignedLongLong(v);
     return nullptr;
   }
   if (PyIsInstance(v, &PyIntegerArrType_Type)) {  // NumPy integers
@@ -515,16 +515,13 @@ DEFINE_HELPER(ConvertBool, bool, DT_BOOL, ConvertOneBool);
     return errors::InvalidArgument(_error);                      \
   } while (0)
 
-Status PySeqToTensor(PyObject* obj, PyObject* dtype, Tensor* ret) {
+Status PySeqToTensor(PyObject* obj, DataType dtype, Tensor* ret) {
   DataType infer_dtype;
   TensorShape shape;
   TF_RETURN_IF_ERROR(InferShapeAndType(obj, &shape, &infer_dtype));
   DataType requested_dtype = DT_INVALID;
-  if (dtype != Py_None) {
-    int32 dtype_as_int = -1;
-    if (ConvertOneInt32(dtype, &dtype_as_int) == nullptr) {
-      requested_dtype = static_cast<DataType>(dtype_as_int);
-    }
+  if (dtype != DT_INVALID) {
+    requested_dtype = dtype;
   }
   // NOTE(josh11b): If don't successfully convert to the requested type,
   // we just try instead to create a tensor of the inferred type and

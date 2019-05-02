@@ -247,6 +247,11 @@ TEST_F(HloOrderingTest, ValuesInWhileComputations) {
   EXPECT_FALSE(ordering.LiveRangeStrictlyBefore(
       dataflow->GetValueDefinedAt(constant),
       dataflow->GetValueDefinedAt(xla_while), *dataflow));
+  // Value defined as init of while interferes with instructions in the
+  // condition other than the parameter.
+  EXPECT_FALSE(ordering.LiveRangeStrictlyBefore(
+      dataflow->GetValueDefinedAt(constant),
+      dataflow->GetValueDefinedAt(convert), *dataflow));
   EXPECT_TRUE(ordering.MayInterfere(dataflow->GetValueDefinedAt(constant),
                                     dataflow->GetValueDefinedAt(xla_while),
                                     *dataflow));
@@ -261,8 +266,10 @@ TEST_F(HloOrderingTest, ValuesInWhileComputations) {
   EXPECT_FALSE(ordering.MayInterfere(dataflow->GetValueDefinedAt(negate),
                                      dataflow->GetValueDefinedAt(xla_while),
                                      *dataflow));
-
-  EXPECT_TRUE(ordering.IsDefinedBefore(dataflow->GetValueDefinedAt(convert),
+  EXPECT_TRUE(ordering.MayInterfere(dataflow->GetValueDefinedAt(constant),
+                                    dataflow->GetValueDefinedAt(xla_while),
+                                    *dataflow));
+  EXPECT_TRUE(ordering.IsDefinedBefore(dataflow->GetValueDefinedAt(constant),
                                        dataflow->GetValueDefinedAt(xla_while)));
   EXPECT_TRUE(ordering.LiveRangeStrictlyBefore(
       dataflow->GetValueDefinedAt(convert),
@@ -306,7 +313,7 @@ condition.v4 {
   constant.2 = s32[] constant(2)
   prev.2 = (s32[], f32[3]{0}, f32[3]{0}, f32[3]{0}) parameter(0)
   get-tuple-element.8 = s32[] get-tuple-element(prev.2), index=0
-  ROOT greater-than = pred[] greater-than(constant.2, get-tuple-element.8)
+  ROOT greater-than = pred[] compare(constant.2, get-tuple-element.8), direction=GT
 }
 
 fused_computation {
@@ -334,6 +341,61 @@ ENTRY while.v11 {
                           ParseHloString(module_str));
   DependencyHloOrdering ordering(module.get());
   ordering.ToString();  // Shouldn't crash.
+}
+
+TEST_F(HloOrderingTest, ConditionalUseOrdering) {
+  // If buffer defined by one conditional branch is used in another branch, the
+  // use is considered before the definition since only one branch will be
+  // executed.
+  const char* module_str = R"(
+HloModule test_conditional_module
+
+true_branch {
+  param.1 = (s32[]) parameter(0)
+  gte.1 = s32[] get-tuple-element(param.1), index=0
+  negate.1 = s32[] negate(gte.1)
+  ROOT tuple.1 = (s32[]) tuple(negate.1)
+}
+
+false_branch {
+  param.2 = (s32[]) parameter(0)
+  gte.2 = s32[] get-tuple-element(param.2), index=0
+  negate.2 = s32[] negate(gte.2)
+  ROOT tuple.2 = (s32[]) tuple(negate.2)
+}
+
+condition.1 {
+  param.3 = (s32[]) parameter(0)
+  ROOT pred.1 = pred[] constant(true)
+}
+
+body.1 {
+  param.4 = (s32[]) parameter(0)
+  pred.2 = pred[] constant(true)
+  ROOT conditional = (s32[]) conditional(pred.2, param.4, param.4), true_computation=true_branch, false_computation=false_branch
+}
+
+ENTRY root {
+  param.5 = (s32[]) parameter(0)
+  ROOT while = (s32[]) while(param.5), condition=condition.1, body=body.1
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseHloString(module_str));
+  TF_ASSERT_OK_AND_ASSIGN(auto dataflow, HloDataflowAnalysis::Run(*module));
+  DependencyHloOrdering ordering(module.get());
+
+  HloInstruction* negate_1 = FindInstruction(module.get(), "negate.1");
+  VLOG(0) << dataflow->ToString();
+  VLOG(0) << dataflow->GetValueDefinedAt(negate_1);
+  for (const HloUse& negate_use :
+       dataflow->GetValueDefinedAt(negate_1).uses()) {
+    if (negate_use.instruction->opcode() != HloOpcode::kNegate) {
+      continue;
+    }
+    EXPECT_TRUE(ordering.UseIsBeforeValueDefinition(
+        negate_use, dataflow->GetValueDefinedAt(negate_1), *dataflow));
+  }
 }
 
 TEST_F(HloOrderingTest, ConditionalInstructionOrdering) {
@@ -493,6 +555,37 @@ TEST_F(HloOrderingTest,
 
   EXPECT_TRUE(ordering.MayInterfere(dataflow->GetValueDefinedAt(root),
                                     dataflow->GetValueDefinedAt(dead),
+                                    *dataflow));
+}
+
+TEST_F(HloOrderingTest, InterferenceWithOuterRoot) {
+  absl::string_view hlo_string = R"(
+HloModule InterferenceWithOuterRoot, is_scheduled=true
+
+Emmbedded (embedded_param: f32[42]) -> f32[42] {
+  embedded_param = f32[42]{0} parameter(0)
+  multiply = f32[42]{0} multiply(embedded_param, embedded_param)
+  ROOT log = f32[42]{0} log(multiply)
+}
+
+ENTRY InterferenceWithOuterRoot {
+  param = f32[4096,4096]{1,0} parameter(0)
+  ROOT add = f32[4096,4096]{1,0} add(param, param)
+  call = f32[42]{0} call(param), to_apply=Emmbedded
+}
+
+)";
+  HloModuleConfig hlo_config;
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseHloString(hlo_string, hlo_config));
+  TF_ASSERT_OK_AND_ASSIGN(auto dataflow,
+                          HloDataflowAnalysis::Run(*module, /*ssa_form=*/true));
+  DependencyHloOrdering ordering(module.get());
+  auto multiply = FindInstruction(module.get(), "multiply");
+  auto add = FindInstruction(module.get(), "add");
+
+  EXPECT_TRUE(ordering.MayInterfere(dataflow->GetValueDefinedAt(multiply),
+                                    dataflow->GetValueDefinedAt(add),
                                     *dataflow));
 }
 

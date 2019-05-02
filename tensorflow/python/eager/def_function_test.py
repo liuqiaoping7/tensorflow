@@ -17,11 +17,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from six.moves import range
+
 import functools
 import weakref
 
 from tensorflow.python.eager import backprop
-from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import lift_to_graph
 from tensorflow.python.framework import constant_op
@@ -113,6 +114,14 @@ class DefFunctionTest(test.TestCase):
 
     with self.assertRaises(ValueError):
       fn(1.0)
+
+  def testRange(self):
+
+    @def_function.function
+    def f(unused_x):
+      return 1.0
+
+    self.assertAllEqual(f(range(5)), 1.0)
 
   def testCorrectVariableCreation(self):
 
@@ -246,6 +255,30 @@ class DefFunctionTest(test.TestCase):
         def_function.function(functools.partial(lambda x, y: x + y, 1.))(
             constant_op.constant(2.)))
 
+  def test_functools_partial_new_default(self):
+    def f(x=3, y=7):
+      return x + y
+
+    func = def_function.function(functools.partial(f, y=6))
+    self.assertEqual(func().numpy(), 9)
+    self.assertEqual(func(y=8).numpy(), 11)
+
+  def test_functools_partial_keywords(self):
+    def f(x, y):
+      return x + y
+
+    func = def_function.function(
+        functools.partial(f, x=array_ops.zeros([1]), y=array_ops.zeros([1])))
+    self.assertAllEqual(func(), [0.0])
+
+  def test_functools_partial_single_positional(self):
+    def f(x, y):
+      return x + y
+
+    func = def_function.function(
+        functools.partial(f, constant_op.constant(1)))
+    self.assertAllEqual(func(5), 6)
+
   def test_unspecified_default_argument(self):
     wrapped = def_function.function(
         lambda x, y=2: x + y,
@@ -274,6 +307,39 @@ class DefFunctionTest(test.TestCase):
     self.assertEqual(signature_args,
                      (tensor_spec.TensorSpec(
                          None, dtypes.float32, name='x'),))
+
+  def test_concrete_function_keyword_arguments(self):
+    @def_function.function
+    def f(x):
+      return x
+
+    conc = f.get_concrete_function(
+        tensor_spec.TensorSpec(None, dtypes.float32, 'y'))
+    conc(y=constant_op.constant(3.0))
+    signature_args, _ = conc.structured_input_signature
+    self.assertEqual('y', signature_args[0].name)
+
+    conc = f.get_concrete_function(tensor_spec.TensorSpec(None, dtypes.float32))
+    conc(x=constant_op.constant(3.0))
+    signature_args, _ = conc.structured_input_signature
+    self.assertEqual('x', signature_args[0].name)
+
+    @def_function.function
+    def g(x):
+      return x[0]
+
+    conc = g.get_concrete_function(
+        [tensor_spec.TensorSpec(None, dtypes.float32, 'z'), 2])
+    conc(z=constant_op.constant(3.0))
+    signature_args, _ = conc.structured_input_signature
+    self.assertEqual('z', signature_args[0][0].name)
+
+    with self.assertRaisesRegexp(
+        ValueError, 'either zero or all names have to be specified'):
+      conc = g.get_concrete_function([
+          tensor_spec.TensorSpec(None, dtypes.float32, 'z'),
+          tensor_spec.TensorSpec(None, dtypes.float32),
+      ])
 
   def test_error_inner_capture(self):
 
@@ -444,10 +510,8 @@ class DefFunctionTest(test.TestCase):
     v_holder[1].assign(11.)
     self.assertAllClose([14., 15.], wrapper(constant_op.constant(2.)))
 
+  @test_util.run_gpu_only
   def testDeviceAnnotationRespected(self):
-    if not context.num_gpus():
-      self.skipTest("Needs multiple devices")
-
     a = []
 
     @def_function.function()
